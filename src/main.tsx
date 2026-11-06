@@ -6,15 +6,17 @@ import {
   Clock3, Copy, Crown, Expand, Flame, Gamepad2, Hash,
   PartyPopper, Play, Plus, Radio, RotateCcw, ScanLine, Settings2, ShieldCheck,
   Smartphone, Sparkles, Target, Trophy, Users, Wifi, WifiOff, X, Zap,
+  BookOpen, Pencil, RefreshCw, Save, Loader2, AlertTriangle, WandSparkles,
 } from 'lucide-react';
 import './style.css';
 
 type Topic = { id: string; label: string; emoji: string; count: number };
-type Config = { topics: string[]; questionCount: number; timerSeconds: number; boardSize: 4 | 5 };
-type Phase = 'lobby' | 'question' | 'reveal' | 'mark' | 'intermission' | 'finished';
+type Config = { topics: string[]; questionCount: number; timerSeconds: number; boardSize: 4 | 5; difficulty: 'easy' | 'medium' | 'hard' | 'mixed'; questionSource: 'ai' | 'curated' };
+type Phase = 'draft' | 'lobby' | 'question' | 'reveal' | 'mark' | 'intermission' | 'finished';
 type Score = { id: string; name: string; lines: number; correct: number; averageMs: number | null; marks: number };
 type Leaderboards = { overall: Score[]; accuracy: Score[]; fastest: Score[] };
 type Question = { id: string; topic: string; prompt: string; options: string[]; correctIndex?: number; explanation?: string };
+type DraftQuestion = Question & { difficulty: 'easy' | 'medium' | 'hard'; correctIndex: number; explanation: string };
 type PlayerView = {
   id: string; name: string; marks: boolean[]; candidates: number[]; markedRound: number;
   correctCount: number; lineCount: number; completedLines: number[][]; rank: number;
@@ -26,6 +28,8 @@ type GameState = {
   answeredCount: number; correctCount: number | null; leaderboard: Leaderboards;
   role: 'host' | 'player'; me?: PlayerView;
   players?: { id: string; name: string; connected: boolean }[]; qr?: string; joinUrl?: string;
+  draftQuestions?: DraftQuestion[]; generating?: boolean; regeneratingIndex?: number | null;
+  generationError?: string | null; aiConfigured?: boolean;
 };
 type HostSession = { code: string; token: string };
 type PlayerSession = { code: string; token: string; name: string };
@@ -66,7 +70,7 @@ function App() {
   const [name, setName] = useState('');
   const [codeInput, setCodeInput] = useState(initialCode);
   const [selectedChoice, setSelectedChoice] = useState<number | null>(null);
-  const [config, setConfig] = useState<Config>({ topics: ['general', 'science', 'movies'], questionCount: 12, timerSeconds: 30, boardSize: 4 });
+  const [config, setConfig] = useState<Config>({ topics: ['general', 'science', 'movies'], questionCount: 12, timerSeconds: 30, boardSize: 4, difficulty: 'mixed', questionSource: 'ai' });
   const hostRef = useRef(hostSession);
   const playerRef = useRef(playerSession);
   hostRef.current = hostSession;
@@ -192,13 +196,14 @@ function App() {
           </div>
           <div className="setup-options"><div className="field-block"><div className="field-heading"><h3>Number of questions</h3></div><div className="segmented">{[10,12,15,20].map((n) => <button type="button" key={n} disabled={n === 20 && config.boardSize === 4} className={config.questionCount === n ? 'active' : ''} onClick={() => setConfig((c) => ({ ...c, questionCount: n }))}>{n}</button>)}</div></div>
             <div className="field-block"><div className="field-heading"><h3>Time per question</h3></div><div className="segmented">{[15,30,45,60].map((n) => <button type="button" key={n} className={config.timerSeconds === n ? 'active' : ''} onClick={() => setConfig((c) => ({...c, timerSeconds: n}))}>{n}s</button>)}</div></div></div>
+          <div className="field-block"><div className="field-heading"><h3>Trivia difficulty</h3><span className="tiny-pill"><Sparkles size={12}/> AI GENERATED</span></div><p className="hint">Choose how challenging the questions should be.</p><div className="segmented difficulty-options">{(['easy','medium','hard','mixed'] as const).map((level) => <button type="button" key={level} className={config.difficulty === level ? 'active' : ''} onClick={() => setConfig((c) => ({...c, difficulty: level}))}>{level.charAt(0).toUpperCase() + level.slice(1)}</button>)}</div></div>
           <div className="field-block"><div className="field-heading"><h3>Bingo board</h3></div><div className="segmented board-size"><button type="button" className={config.boardSize === 4 ? 'active' : ''} onClick={() => setConfig((c) => ({...c, boardSize: 4, questionCount: Math.min(c.questionCount, 15)}))}>4 × 4 <span>Quick play</span></button><button type="button" className={config.boardSize === 5 ? 'active' : ''} onClick={() => setConfig((c) => ({...c, boardSize: 5}))}>5 × 5 <span>Longer game</span></button></div></div>
-          <button className="btn primary large create-btn" disabled={busy || !connected || !topics.length} onClick={createGame}>{busy ? 'Creating your room...' : 'Create game room'} <ArrowRight size={20}/></button>
+          <button className="btn primary large create-btn" disabled={busy || !connected || !topics.length} onClick={createGame}>{busy ? 'Creating your room...' : 'Open AI Question Studio'} <WandSparkles size={20}/></button>
           {error && <ErrorBanner text={error} />}
         </section>
         <aside className="setup-aside"><div className="preview-glow"/><div className="preview-card"><div className="preview-header"><span className="preview-dot"/> LIVE EXPERIENCE</div><div className="preview-icon"><Gamepad2 size={49}/></div><h2>Big screens.<br/><span>Big energy.</span></h2><p>A game-show experience for the whole room.</p><div className="preview-features"><span><ScanLine size={18}/> QR code join</span><span><Radio size={18}/> Real-time rankings</span><span><Trophy size={18}/> Three award podiums</span><span><Wifi size={18}/> Local Wi-Fi play</span></div></div><div className="summary-strip"><Clock3 size={17}/> About {Math.ceil(config.questionCount * (config.timerSeconds + 14) / 60)} min <span>·</span> {config.topics.length} topics <span>·</span> {config.boardSize}×{config.boardSize} board</div></aside>
       </div>
-    </main> : state.phase === 'lobby' ? <main className="lobby-wrap">
+    </main> : state.phase === 'draft' ? <QuestionStudio state={state} perform={perform} onNewGame={leaveHost} topics={topics}/> : state.phase === 'lobby' ? <main className="lobby-wrap">
       <div className="eyebrow">YOUR GAME IS READY</div><h1>Bring everyone <span>together.</span></h1><p className="muted">Scan, join, and get ready to win.</p>
       <div className="lobby-grid"><section className="panel qr-panel"><span className="micro-label">SCAN TO JOIN</span><div className="qr-frame"><img src={state.qr} alt="QR code to join the local Trivia Bingo room" /></div><div className="room-code">{state.code}</div><p>Or visit this address on the same Wi-Fi</p><div className="copy-url"><span>{state.joinUrl}</span><button aria-label="Copy link" onClick={() => { if (state.joinUrl) void navigator.clipboard.writeText(state.joinUrl); }}><Copy size={17}/></button></div></section>
         <section className="panel lobby-people"><div className="lobby-people-title"><div><h2>Players in the room</h2><p>Waiting for everyone to join</p></div><span className="players-count"><Users size={17}/>{state.playerCount}</span></div><div className="people-list">{state.players?.length ? state.players.map((p) => <div className="person-chip" key={p.id}><div className="avatar">{p.name.charAt(0).toUpperCase()}</div>{p.name}<span className={`online-dot ${p.connected ? '' : 'offline'}`}/></div>) : <div className="empty-people"><Users size={38}/><h3>It's quiet in here...</h3><p>Players appear here when they scan your code.</p></div>}</div><div className="lobby-bottom"><div className="game-meta"><span><Brain size={16}/>{state.config.topics.length} topics</span><span><CircleHelp size={16}/>{state.questionCount} questions</span><span><Clock3 size={16}/>{state.config.timerSeconds}s timer</span></div><button className="btn primary large" disabled={state.playerCount === 0} onClick={() => void perform('host:start')}><Play size={19} fill="currentColor"/> Start the game <ArrowRight size={18}/></button>{error && <ErrorBanner text={error}/>}</div></section></div>
@@ -210,6 +215,46 @@ function App() {
     <footer className="host-footer"><span>TRIVIA <strong>BINGO</strong></span><span><Wifi size={13}/> Local multiplayer</span></footer>
   </div>;
 }
+
+function QuestionStudio({ state, perform, onNewGame, topics }: {
+  state: GameState;
+  perform: (event: string, payload?: object) => Promise<boolean>;
+  onNewGame: () => void;
+  topics: Topic[];
+}) {
+  const questions = state.draftQuestions ?? [];
+  const [editingIndex, setEditingIndex] = useState<number | null>(null);
+  const [editing, setEditing] = useState<DraftQuestion | null>(null);
+  const busy = Boolean(state.generating || state.regeneratingIndex !== null && state.regeneratingIndex !== undefined);
+  const startEditing = (question: DraftQuestion, index: number) => {
+    setEditingIndex(index);
+    setEditing({ ...question, options: [...question.options] });
+  };
+  const saveEdit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!editing || editingIndex === null) return;
+    const success = await perform('host:updateQuestion', { index: editingIndex, question: editing });
+    if (success) { setEditingIndex(null); setEditing(null); }
+  };
+
+  return <main className="studio-wrap">
+    <div className="studio-top"><div><div className="eyebrow"><WandSparkles size={16}/> AI QUESTION STUDIO</div><h1>Make it a <span>great game.</span></h1><p>Generate fresh trivia, check the answers, then invite your players.</p></div><button className="btn outline small" onClick={onNewGame}><ArrowLeftIcon/> Game settings</button></div>
+    <div className="studio-layout"><section className="studio-questions">
+      <div className="panel studio-toolbar"><div><span className="micro-label">YOUR QUESTION PACK</span><h2>{questions.length} <span>/ {state.config.questionCount}</span> questions ready</h2><p>{state.config.topics.map((topic) => topics.find((t) => t.id === topic)?.label ?? topic).join(' · ')} · {state.config.difficulty} difficulty</p></div><div className="studio-controls"><button className="btn primary" disabled={!state.aiConfigured || busy} onClick={() => { if (questions.length && !window.confirm('Regenerate the entire pack? Your edits will be replaced.')) return; void perform('host:generate'); }}>
+        {state.generating ? <Loader2 className="spin" size={17}/> : <WandSparkles size={17}/>} {state.generating ? 'Generating...' : questions.length ? 'Regenerate all' : 'Generate questions'}</button><button className="btn outline" disabled={busy} onClick={() => { if (questions.length && !window.confirm('Replace this pack with the built-in offline questions?')) return; void perform('host:useFallback'); }}><BookOpen size={17}/> Use offline questions</button></div></div>
+      {!state.aiConfigured && <div className="studio-callout"><AlertTriangle size={19}/><span><strong>OpenAI API key not configured.</strong> Add <code>OPENAI_API_KEY</code> to the server's <code>.env</code> file and restart. You can still preview the built-in questions.</span></div>}
+      {state.generationError && <ErrorBanner text={state.generationError}/>}
+      {state.generating && <div className="studio-generating panel"><Loader2 size={44} className="spin"/><h3>Creating your trivia...</h3><p>We're generating {state.config.questionCount} questions across your chosen topics. This can take a little while.</p></div>}
+      {!state.generating && !questions.length && <div className="studio-empty panel"><WandSparkles size={54}/><h3>Fresh questions, just for this game</h3><p>Generate your first set with OpenAI, or use the built-in questions while setting up your API key.</p></div>}
+      {questions.map((question, index) => <article className="panel studio-question" key={question.id}>
+        <div className="studio-question-top"><div className="studio-question-meta"><span>Q{String(index + 1).padStart(2, '0')}</span><span className="studio-topic">{topics.find((t) => t.id === question.topic)?.emoji ?? '✨'} {topics.find((t) => t.id === question.topic)?.label ?? question.topic}</span><span className={`studio-difficulty ${question.difficulty}`}>{question.difficulty}</span></div><div className="studio-actions"><button disabled={busy || !state.aiConfigured} title="Regenerate this question" onClick={() => void perform('host:regenerateQuestion', { index })}>{state.regeneratingIndex === index ? <Loader2 size={17} className="spin"/> : <RefreshCw size={17}/>}</button><button disabled={busy} title="Edit question" onClick={() => startEditing(question, index)}><Pencil size={17}/></button></div></div>
+        {editingIndex === index && editing ? <form className="studio-edit-form" onSubmit={saveEdit}><label>Question<textarea value={editing.prompt} maxLength={260} onChange={(e) => setEditing({ ...editing, prompt: e.target.value })} rows={2} required/></label><div className="studio-edit-grid"><label>Topic<select value={editing.topic} onChange={(e) => setEditing({ ...editing, topic: e.target.value })}>{state.config.topics.map((topic) => <option key={topic} value={topic}>{topics.find((t) => t.id === topic)?.label ?? topic}</option>)}</select></label><label>Difficulty<select value={editing.difficulty} onChange={(e) => setEditing({ ...editing, difficulty: e.target.value as DraftQuestion['difficulty'] })}><option value="easy">Easy</option><option value="medium">Medium</option><option value="hard">Hard</option></select></label></div><div className="studio-edit-options"><span>Answer choices, select the correct one:</span>{editing.options.map((option, i) => <div className="studio-edit-option" key={i}><input type="radio" aria-label={`Mark answer ${i + 1} as correct`} checked={editing.correctIndex === i} onChange={() => setEditing({ ...editing, correctIndex: i })}/><input aria-label={`Answer choice ${i + 1}`} value={option} maxLength={130} onChange={(e) => setEditing({ ...editing, options: editing.options.map((v, j) => i === j ? e.target.value : v) })} required/></div>)}</div><label>Explanation<textarea rows={2} maxLength={450} value={editing.explanation} onChange={(e) => setEditing({ ...editing, explanation: e.target.value })} required/></label><div className="studio-edit-buttons"><button type="button" className="btn outline" onClick={() => { setEditingIndex(null); setEditing(null); }}>Cancel</button><button type="submit" className="btn primary"><Save size={16}/> Save question</button></div></form> : <><h3>{question.prompt}</h3><div className="studio-options">{question.options.map((option, i) => <div key={i} className={`studio-option ${i === question.correctIndex ? 'right' : ''}`}><span>{'ABCD'[i]}</span>{option}{i === question.correctIndex && <CheckCircle2 size={16}/>}</div>)}</div><p className="studio-explanation"><CheckCircle2 size={16}/> {question.explanation}</p></>}
+      </article>)}
+    </section><aside className="studio-sidebar"><div className="panel studio-sidebar-inner"><div className="icon-square violet"><ShieldCheck size={23}/></div><h3>Ready to play?</h3><p>Review your questions before going live. Players won't see any questions or answers until the game starts.</p><div className="studio-checks"><span><CheckCircle2 size={17}/> {questions.length}/{state.config.questionCount} questions</span><span><CheckCircle2 size={17}/> Correct answers marked</span><span><CheckCircle2 size={17}/> Editable explanations</span></div><button className="btn primary large" disabled={busy || questions.length !== state.config.questionCount || editingIndex !== null} onClick={() => void perform('host:approveQuestions')}>Approve & open lobby <ArrowRight size={18}/></button><div className="studio-note"><ShieldCheck size={15}/> The API key stays on the host server, never in player browsers.</div></div></aside></div>
+  </main>;
+}
+
+function ArrowLeftIcon() { return <ArrowRight size={16} className="flip-icon"/>; }
 
 function Topbar({ connection, player, host, onFullscreen }: { connection: boolean; player?: boolean; host?: boolean; onFullscreen?: () => void }) {
   return <header className="topbar"><a className="brand" href={player ? '/join' : '/'}><span className="brand-icon"><Target size={23}/></span><span>trivia<span className="brand-accent">bingo</span><span className="brand-dot">.</span></span></a><div className="topbar-right"><span className={`connection ${connection ? '' : 'disconnected'}`}>{connection ? <Wifi size={15}/> : <WifiOff size={15}/>}<span>{connection ? 'Connected' : 'Connecting...'}</span></span>{host && <button className="top-icon-btn" title="Toggle fullscreen" aria-label="Toggle fullscreen" onClick={onFullscreen}><Expand size={18}/></button>}{player && <span className="topbar-pill"><Smartphone size={14}/> PLAYER MODE</span>}</div></header>;

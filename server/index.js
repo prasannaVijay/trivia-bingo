@@ -9,6 +9,12 @@ import { Server } from 'socket.io';
 import qrcode from 'qrcode-generator';
 import { TOPICS, QUESTION_BANK } from './questions.js';
 import { ROUND_CONFIG, candidateSquares, completeLines, createLeaderboards, selectQuestions } from './engine.js';
+import { DIFFICULTIES, generateQuestions, validateEditableQuestion, validateQuestionPack } from './ai.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+// Node reads this only on the host. It is never served as a frontend asset.
+try { process.loadEnvFile?.(path.resolve(__dirname, '../.env')); }
+catch (error) { if (error.code !== 'ENOENT') console.warn('Could not load .env:', error.message); }
 
 const app = express();
 app.disable('x-powered-by');
@@ -17,7 +23,6 @@ const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: true }, maxHttpBufferSize: 20_000 });
 const games = new Map();
 const PORT = Number(process.env.PORT || 3000);
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distDir = path.resolve(__dirname, '../dist');
 
 function code() {
@@ -78,7 +83,7 @@ function viewFor(game, socket) {
     phase: game.phase,
     deadline: game.deadline,
     index: game.index,
-    questionCount: game.questions.length,
+    questionCount: game.config.questionCount,
     config: game.config,
     question: questionView(game),
     playerCount: players.length,
@@ -91,6 +96,11 @@ function viewFor(game, socket) {
       players: players.map((p) => ({ id: p.id, name: p.name, connected: p.connected })),
       qr: game.qr,
       joinUrl: game.joinUrl,
+      draftQuestions: game.phase === 'draft' ? game.questions : undefined,
+      generating: game.generating,
+      regeneratingIndex: game.regeneratingIndex,
+      generationError: game.generationError,
+      aiConfigured: Boolean(process.env.OPENAI_API_KEY),
     } : {}),
     ...(myPlayer ? {
       me: {
@@ -119,7 +129,30 @@ function broadcast(game) {
 }
 
 function publishLeaderboard(game) {
-  game.publishedLeaderboard = createLeaderboards([...game.players.values()], game.config.boardSize, game.questions.length);
+  game.publishedLeaderboard = createLeaderboards([...game.players.values()], game.config.boardSize, game.config.questionCount);
+}
+
+function beginGeneration(game, index = null) {
+  game.generationError = null;
+  game.lastGeneratedAt = Date.now();
+  if (index === null) game.generating = true;
+  else game.regeneratingIndex = index;
+  broadcast(game);
+  const excludePrompts = index === null ? [] : game.questions.map((question) => question.prompt);
+  void generateQuestions({
+    topics: game.config.topics, difficulty: game.config.difficulty,
+    count: index === null ? game.config.questionCount : 1, excludePrompts,
+  }).then((questions) => {
+    if (game.phase !== 'draft') return;
+    const updated = index === null ? questions : game.questions.map((q, i) => i === index ? questions[0] : q);
+    game.questions = validateQuestionPack(updated, game.config.topics, game.config.questionCount);
+  }).catch((error) => {
+    game.generationError = error instanceof Error ? error.message : 'Question generation failed. Try again.';
+  }).finally(() => {
+    game.generating = false;
+    game.regeneratingIndex = null;
+    broadcast(game);
+  });
 }
 
 function clearTimer(game) {
@@ -204,20 +237,29 @@ app.get('/api/topics', (_req, res) => res.json({ topics: TOPICS.map((topic) => (
 })) }));
 
 app.post('/api/games', async (req, res) => {
+  // Only the local host can create cost-bearing AI game rooms. Players join from the LAN via Socket.IO.
+  if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress) && process.env.TRIVIA_ALLOW_REMOTE_HOST !== 'true')
+    return res.status(403).json({ error: 'Create games from the host laptop using localhost:3000.' });
   const raw = req.body ?? {};
   const topics = [...new Set(Array.isArray(raw.topics) ? raw.topics : [])];
   const timerSeconds = Number(raw.timerSeconds);
   const questionCount = Number(raw.questionCount);
   const boardSize = Number(raw.boardSize);
+  const questionSource = raw.questionSource === 'ai' ? 'ai' : 'curated';
+  const difficulty = typeof raw.difficulty === 'string' ? raw.difficulty : 'medium';
   if (!topics.length || !topics.every((topic) => TOPICS.some((t) => t.id === topic)))
     return res.status(400).json({ error: 'Choose at least one valid topic.' });
   if (![15, 30, 45, 60].includes(timerSeconds))
     return res.status(400).json({ error: 'Timer must be 15, 30, 45 or 60 seconds.' });
   if (![4, 5].includes(boardSize) || ![10, 12, 15, 20].includes(questionCount) || (boardSize === 4 && questionCount > 15))
     return res.status(400).json({ error: 'Choose a valid board size and question count.' });
-  let questions;
-  try { questions = selectQuestions(QUESTION_BANK, topics, questionCount); }
-  catch (err) { return res.status(400).json({ error: err.message }); }
+  if (!DIFFICULTIES.includes(difficulty))
+    return res.status(400).json({ error: 'Choose a valid difficulty.' });
+  let questions = [];
+  if (questionSource === 'curated') {
+    try { questions = selectQuestions(QUESTION_BANK, topics, questionCount); }
+    catch (err) { return res.status(400).json({ error: err.message }); }
+  }
   const roomCode = code();
   const joinUrl = `${joinBaseUrl()}/join/${roomCode}`;
   const qrGenerator = qrcode(0, 'M');
@@ -227,9 +269,10 @@ app.post('/api/games', async (req, res) => {
   const game = {
     code: roomCode,
     hostToken: randomBytes(24).toString('base64url'),
-    config: { topics, timerSeconds, questionCount, boardSize },
-    questions, phase: 'lobby', index: -1, deadline: null, timer: null,
+    config: { topics, timerSeconds, questionCount, boardSize, difficulty, questionSource },
+    questions, phase: questionSource === 'ai' ? 'draft' : 'lobby', index: -1, deadline: null, timer: null,
     players: new Map(), joinUrl, qr,
+    generating: false, regeneratingIndex: null, generationError: null, lastGeneratedAt: 0,
     publishedLeaderboard: { overall: [], accuracy: [], fastest: [] },
   };
   games.set(roomCode, game);
@@ -257,6 +300,74 @@ io.on('connection', (socket) => {
     const game = games.get(String(gameCode ?? '').toUpperCase());
     if (!game || token !== game.hostToken) return fail(ack, 'Host session not found. Create a new game.');
     attach(game, 'host', token, null);
+    ok(ack);
+    broadcast(game);
+  });
+
+  socket.on('host:generate', (_, ack) => {
+    const game = gameForSocket(socket, 'host');
+    if (!game) return fail(ack, 'Not authorized as host.');
+    if (game.phase !== 'draft') return fail(ack, 'Questions have already been approved.');
+    if (game.generating || game.regeneratingIndex !== null) return fail(ack, 'Please wait for the current generation.');
+    if (!process.env.OPENAI_API_KEY) return fail(ack, 'OPENAI_API_KEY is not configured. Add it to .env and restart the server.');
+    if (Date.now() - game.lastGeneratedAt < 5000) return fail(ack, 'Wait a moment before generating again.');
+    beginGeneration(game);
+    ok(ack);
+  });
+
+  socket.on('host:regenerateQuestion', ({ index } = {}, ack) => {
+    const game = gameForSocket(socket, 'host');
+    if (!game) return fail(ack, 'Not authorized as host.');
+    if (game.phase !== 'draft' || !Number.isInteger(index) || index < 0 || index >= game.questions.length)
+      return fail(ack, 'Invalid question to regenerate.');
+    if (game.generating || game.regeneratingIndex !== null) return fail(ack, 'Please wait for the current generation.');
+    if (!process.env.OPENAI_API_KEY) return fail(ack, 'OPENAI_API_KEY is not configured.');
+    if (Date.now() - game.lastGeneratedAt < 5000) return fail(ack, 'Wait a moment before regenerating.');
+    beginGeneration(game, index);
+    ok(ack);
+  });
+
+  socket.on('host:updateQuestion', ({ index, question } = {}, ack) => {
+    const game = gameForSocket(socket, 'host');
+    if (!game) return fail(ack, 'Not authorized as host.');
+    if (game.phase !== 'draft' || game.generating || game.regeneratingIndex !== null)
+      return fail(ack, 'Questions cannot be edited at this time.');
+    if (!Number.isInteger(index) || index < 0 || index >= game.questions.length)
+      return fail(ack, 'Invalid question index.');
+    try {
+      const validated = validateEditableQuestion({ ...question, id: game.questions[index].id }, game.config.topics);
+      const updated = game.questions.map((q, i) => i === index ? validated : q);
+      game.questions = validateQuestionPack(updated, game.config.topics, game.config.questionCount);
+      game.generationError = null;
+    } catch (error) { return fail(ack, error.message); }
+    ok(ack);
+    broadcast(game);
+  });
+
+  socket.on('host:useFallback', (_, ack) => {
+    const game = gameForSocket(socket, 'host');
+    if (!game) return fail(ack, 'Not authorized as host.');
+    if (game.phase !== 'draft' || game.generating || game.regeneratingIndex !== null)
+      return fail(ack, 'Cannot load fallback questions right now.');
+    try {
+      game.questions = selectQuestions(QUESTION_BANK, game.config.topics, game.config.questionCount)
+        .map((q) => ({ ...q, difficulty: 'medium' }));
+    } catch (error) { return fail(ack, error.message); }
+    game.generationError = null;
+    ok(ack);
+    broadcast(game);
+  });
+
+  socket.on('host:approveQuestions', (_, ack) => {
+    const game = gameForSocket(socket, 'host');
+    if (!game) return fail(ack, 'Not authorized as host.');
+    if (game.phase !== 'draft' || game.generating || game.regeneratingIndex !== null)
+      return fail(ack, 'Questions cannot be approved yet.');
+    try { game.questions = validateQuestionPack(game.questions, game.config.topics, game.config.questionCount); }
+    catch (error) { return fail(ack, error.message); }
+    game.phase = 'lobby';
+    game.generationError = null;
+    publishLeaderboard(game);
     ok(ack);
     broadcast(game);
   });

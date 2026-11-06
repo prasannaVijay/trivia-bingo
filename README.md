@@ -1,6 +1,6 @@
 # Trivia Bingo 🎉
 
-A local-first multiplayer trivia party game. The host runs a game on a laptop, guests scan a QR code on the same Wi-Fi, and everyone plays from their phone. No accounts, cloud service, or internet connection is required **after setup**.
+A local-first multiplayer trivia party game. The host runs a game on a laptop, guests scan a QR code on the same Wi-Fi, and everyone plays from their phone. OpenAI generates a fresh question pack before each game. **Generation needs an internet connection and API key; gameplay remains local on Wi-Fi after the questions are approved.** Built-in questions provide an offline fallback.
 
 ## Quick start
 
@@ -15,12 +15,42 @@ Requirements: **Node.js 20.19+ or 22.12+** (Node.js 24 recommended), npm, and a 
    npm start
    ```
 
-3. On the host laptop, visit **http://localhost:3000** in Chrome, Edge, or Safari.
-4. Select one or more topics, board size, question count and timer (15, 30, 45 or 60 seconds).
-5. Create a room. Display or screen-share the host screen.
-6. Players scan the QR code, join using a nickname, and wait for the host to start.
+3. To enable AI trivia generation, copy `.env.example` to `.env` in the project folder and add your own OpenAI API key:
 
-**Tip:** Run `npm install` and `npm run build` before the party while online. Only `npm start` is needed during the party, and the game itself works offline on the LAN.
+   ```dotenv
+   OPENAI_API_KEY=your-api-key-here
+   OPENAI_MODEL=gpt-4.1-mini
+   ```
+
+   Leave `.env` on your laptop. **Never commit it to GitHub.** `.gitignore` excludes it. An API key is billed through the OpenAI API account separately from a ChatGPT subscription.
+
+4. Restart `npm start` after changing `.env`. On the host laptop, visit **http://localhost:3000** in Chrome, Edge, or Safari.
+5. Select topics, difficulty (easy, medium, hard or mixed), board size, question count and timer (15, 30, 45 or 60 seconds).
+6. In **AI Question Studio**, generate a pack, preview all answers, edit mistakes or regenerate individual questions. You can also load the built-in questions when offline.
+7. Click **Approve & open lobby**. Display or screen-share the host screen.
+8. Players scan the QR code, join using a nickname, and wait for the host to start.
+
+**Tip:** Install dependencies and build before the party. Generate and approve questions while online. Once the game reaches the lobby, gameplay does not require AI or the internet.
+
+### If npm is pointing to a corporate package registry
+
+This project uses public npm packages. If npm tries to download from a corporate registry you cannot reach, run the following from the project folder to override that registry for this command without changing global npm settings:
+
+```bash
+npm ci --registry=https://registry.npmjs.org/ --replace-registry-host=always
+```
+
+Check for a project-specific `.npmrc` or environment variable if that still does not work.
+
+### AI generation and review
+
+- New games use OpenAI's Responses API with strict structured JSON output.
+- Each generated question includes its topic, difficulty, four answers, one correct answer and an explanation.
+- The server validates structure, rejects duplicate choices and duplicate questions, and shuffles answer positions.
+- The host can **edit or regenerate any question**. Generating another pack replaces the current draft, but never changes an already-approved game.
+- Generation requests are authenticated to the host game room. New game creation is restricted to localhost by default to prevent other Wi-Fi users from consuming API quota.
+- If generation fails, use **Use offline questions** in Question Studio. The fixed 160-question bank remains available.
+- AI can still generate factual errors. The host should check answers before approval.
 
 ### Windows terminal
 
@@ -80,7 +110,7 @@ Each awards section displays up to three winners. If nobody completes a Bingo li
 
 ### Included content
 
-Eight topics with 20 questions each (160 bundled questions): general knowledge, science, geography, history, movies and TV, music, sports and technology. Questions are selected without repetition and balanced across the chosen categories.
+Eight topic categories: general knowledge, science, geography, history, movies and TV, music, sports and technology. OpenAI generates fresh questions each game. The existing 160-question bank is available as an offline fallback.
 
 ## Developer commands
 
@@ -88,6 +118,7 @@ Eight topics with 20 questions each (160 bundled questions): general knowledge, 
 npm run build    # Typecheck React/TypeScript and package static assets
 npm test         # Unit tests for lines, random choices, ranking, question selection
 npm run smoke    # Local multiplayer integration test (~19 seconds)
+npm run smoke:ai # End-to-end Question Studio test with a fake AI service (~6 seconds)
 npm start        # Host the production app on 0.0.0.0:3000
 ```
 
@@ -99,6 +130,7 @@ For development, run `npm run dev:server` and `npm run dev:client` in separate t
 - **Express + Socket.IO** for a server-authoritative game session and real-time room messaging.
 - **Pure game engine functions** in `server/engine.js` for card choices, completed-line counting, ranking and question selection.
 - **Bundled question bank** in `server/questions.js`.
+- **OpenAI question generator** in `server/ai.js`, using the Responses API and structured output validation. API secrets stay on the Node server.
 - **In-memory active sessions** while the server runs. Completed game results are written to `data/<ROOMCODE>-results.json` (not uploaded anywhere).
 
 The server never sends the correct answer to clients during the question phase. The host has an unguessable session token, and each player has a separate reconnect token saved in that phone's browser. Duplicate or late answers and unauthorized Bingo marks are rejected on the server.
@@ -108,7 +140,7 @@ The server never sends the correct answer to clients during the question phase. 
 - New players cannot join after the game starts. Players who joined earlier can reconnect using the same browser.
 - The game pauses only if the host process is stopped; **active sessions do not survive a server restart**. Finished results are saved.
 - The laptop must stay awake. Multiple games can be created in one process, but each game has its own room.
-- Custom questions, pause/resume, sound effects and cloud hosting are future enhancements.
+- Arbitrary custom topic names, pause/resume, sound effects and cloud hosting are future enhancements. Hosts can already edit any generated question.
 - Up to 120 players are accepted per room. For a large event, do a practice run on the actual Wi-Fi first.
 
 ## License
